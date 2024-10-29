@@ -4,6 +4,8 @@ import traceback
 import os
 import json
 
+import pandas as pd
+
 from common import constants
 from common.config.args_config import Config
 from common.config.logger_config import get_logger
@@ -168,18 +170,18 @@ def process_derivone(report_date, asset_class, filepath_config):
     logger.info('Started reading DerivOne Report')
 
     # Check if the asset class has a specific dtype configuration in the derivone_dtype dictionary
-    # if asset_class in derivone_dtype:
-    #     dtype_config = derivone_dtype[asset_class]
-    #     logger.info(f'Using specific dtype configuration for {asset_class}')
-    # else:
-    #     dtype_config = str  # Default dtype if no specific configuration is found
-    #     logger.info(f'Using default dtype configuration (str) for {asset_class}')
+    if asset_class in derivone_dtype:
+        dtype_config = derivone_dtype[asset_class]
+        logger.info(f'Using specific dtype configuration for {asset_class}')
+    else:
+        dtype_config = str  # Default dtype if no specific configuration is found
+        logger.info(f'Using default dtype configuration (str) for {asset_class}')
 
     df_derivone = read_datasets(
         report_type='derivone',
         asset_class=asset_class,
         filepath_list=derivone_filepaths.get(asset_class),
-        # dtype=dtype_config
+        dtype=dtype_config
     )
     logger.info('Finished reading DerivOne Report')
     logger.info(f'DerivOne Shape before deleting duplicates: {df_derivone.shape}')
@@ -310,7 +312,11 @@ def process_asset_class(asset_class, tsr_filepaths, gleif_dict, filepath_config,
         if asset_class == constants.COLLATERAL:
             logger.info(f'Starting Margin State Report (MSR) Specific Processing...')
             df_merged = process_msr(tsr_filepaths, asset_class, gleif_dict)
-            df_merged.loc[:, 'report_date'] = report_date
+
+            logger.info('Adding report_date to underlying data')
+            # df_merged.loc[:, 'report_date'] = pd.Series(report_date, index=df_merged.index)
+            df_merged = pd.concat([df_merged, pd.DataFrame({'report_date': report_date},
+                                                           index=df_merged.index)], axis=1)
 
             # Clean up unused variables and log memory usage
             utility.log_memory_usage_before_after_gc(logger=logger)
@@ -325,7 +331,11 @@ def process_asset_class(asset_class, tsr_filepaths, gleif_dict, filepath_config,
 
             # Merge TSR and DerivOne datasets
             df_merged = merge_datasets(df_tsr, df_derivone, asset_class)
-            df_merged.loc[:, 'report_date'] = report_date
+
+            logger.info('Adding report_date to underlying data')
+            # df_merged.loc[:, 'report_date'] = pd.Series(report_date, index=df_merged.index)
+            df_merged = pd.concat([df_merged, pd.DataFrame({'report_date': report_date},
+                                                           index=df_merged.index)], axis=1)
 
             # Clean up unused variables and log memory usage
             del df_tsr, df_derivone
@@ -421,8 +431,10 @@ def main():
     del df_gleif  # Free up memory
     logger.info(f'Deleted GLEIF dataframe')
 
-    # Initialize summary dictionary
+    # Initialize summary dictionary and lists for successful and failed asset classes
     summary_dict = {}
+    successful_asset_classes = []
+    failed_asset_classes = []
 
     # Process each asset class
     for asset_class in asset_classes:
@@ -436,12 +448,18 @@ def main():
                 if asset_class not in [constants.COLLATERAL]:
                     logger.info(f'Creating Matching Summary Report...')
                     log_matching_status_summary(report_date, asset_class, df_merged, summary_dict)
+
+                # If the processing succeeds, append to successful asset classes
+                successful_asset_classes.append(asset_class)
             else:
                 logger.warning(f"No data processed for {asset_class}")
+                failed_asset_classes.append(asset_class)  # Append to failed if no data processed
 
         except Exception as ex:
             logger.error(f'Error occurred while processing {Config().regime.upper()}-{asset_class}: {ex}')
             logger.error(traceback.format_exc())
+            # Append to failed asset classes if an exception occurs
+            failed_asset_classes.append(asset_class)
 
         logger.info('----------------------------------------------------')
 
@@ -449,6 +467,10 @@ def main():
 
     # After the loop, print the matching status summary to the logs
     print_matching_status_summary(summary_dict)
+
+    # Log the successful and failed asset classes
+    logger.info(f"Successfully processed asset classes: {', '.join(successful_asset_classes) if successful_asset_classes else 'None'}")
+    logger.info(f"Failed asset classes: {', '.join(failed_asset_classes) if failed_asset_classes else 'None'}")
 
     # Generate regime-specific configuration files required for PANDQ model onboarding
     if args.generate_model_config:

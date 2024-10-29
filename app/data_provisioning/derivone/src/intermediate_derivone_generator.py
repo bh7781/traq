@@ -1,11 +1,13 @@
-import pandas as pd
-import argparse
+import time
 import sys
+import argparse
 import os
+import gc
 
 from common.data_ingestion.data_processor import DataProcessor
 from common.config.logger_config import get_logger
 from common.scripts.derivone_deduplicator import DerivOneDeduplicator
+from common.config.filepath_config import FilePathConfig
 
 
 class IntermediateDerivOneGenerator:
@@ -13,149 +15,184 @@ class IntermediateDerivOneGenerator:
     Class to generate intermediate DerivOne data by reading and processing DerivOne files.
     """
 
-    def __init__(self, asset_class, environment, report_date, use_case_name='default', skiprow=0, skipfooter=0, dtype=None):
+    def __init__(self, asset_class, env, report_date):
         """
         Initialize the IntermediateDerivOneGenerator.
         """
-
         self.asset_class = asset_class
-        self.environment = environment
+        self.env = env.lower()
         self.report_date = report_date
-        self.use_case_name = use_case_name
-        self.skiprow = skiprow
-        self.skipfooter = skipfooter
-        self.dtype = dtype
-
-        # Initialize logger
-        self.logger = get_logger(name=__name__, env=self.environment, date=self.report_date, use_case_name=self.use_case_name)
 
         # Initialize DataProcessor for DerivOne
-        self.data_processor = DataProcessor(report_type='derivone', skiprow=self.skiprow, skipfooter=self.skipfooter,
-                                            asset_class=self.asset_class, dtype=self.dtype, logger=self.logger)
+        self.data_processor = DataProcessor(
+            report_type='derivone',
+            skiprow=0,
+            skipfooter=0,
+            asset_class=self.asset_class,
+            dtype=None,
+            logger=logger
+        )
 
-    def read_derivone_data(self, file_paths, usecols=None, nrows=None, deduplicate=True):
+        # Creating instance of FilePathConfig to fetch TSR & DerivOne file paths
+        filepath_config = FilePathConfig(self.report_date, self.env, logger)
+
+        # Read DerivOne Files
+        self.derivone_filepaths = filepath_config.get_derivone_filepaths(report_date=report_date)
+
+        if not self.derivone_filepaths.get(asset_class):
+            error_msg = f"DerivOne file not found for asset class {asset_class} for report date {report_date}"
+            logger.error(error_msg)
+            logger.error("Terminating program execution due to missing DerivOne file.")
+            sys.exit(1)
+
+        logger.info(f"DerivOne File Paths for {asset_class}: {self.derivone_filepaths.get(asset_class)}")
+
+    def cleanup(self):
         """
-        Read DerivOne data from the specified file paths and optionally deduplicate records.
+        Explicit cleanup method to release resources.
+        """
+        if hasattr(self, 'data_processor'):
+            self.data_processor = None
+        if hasattr(self, 'derivone_filepaths'):
+            self.derivone_filepaths = None
+        gc.collect()
+
+    def __enter__(self):
+        """
+        Context manager enter method.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Context manager exit method ensuring cleanup.
+        """
+        self.cleanup()
+
+    def read_derivone_data(self, file_paths):
+        """
+        Read DerivOne data from the specified file paths and deduplicate records.
         """
         try:
-            self.logger.info(f"Reading DerivOne data from {file_paths}")
+            logger.info(f"Reading DerivOne data from {file_paths}")
 
             # Process the data using DataProcessor
-            data = self.data_processor.process_data(
-                file_paths=file_paths
+            data = self.data_processor.process_data(file_paths=file_paths)
+            logger.info(f"Successfully read {len(data)} rows from DerivOne file(s)")
+
+            # Deduplicate the data
+            logger.info("Starting deduplication process")
+            deduplicator = DerivOneDeduplicator(
+                data=data,
+                asset_class=self.asset_class,
+                environment=self.env,
+                report_date=self.report_date,
+                use_case=use_case_name,
+                log_to_file=False
             )
-
-            self.logger.info(f"Successfully read {len(data)} rows from DerivOne file(s)")
-
-            # Deduplicate if requested
-            if deduplicate:
-                self.logger.info("Starting deduplication process")
-                deduplicator = DerivOneDeduplicator(
-                    data=data,
-                    asset_class=self.asset_class,
-                    environment=self.environment,
-                    report_date=self.report_date,
-                    use_case=self.use_case_name
-                )
-                data = deduplicator.run()
-                self.logger.info(f"After deduplication: {len(data)} rows remaining")
+            data = deduplicator.run()
+            logger.info(f"After deduplication: {len(data)} rows remaining")
 
             return data
 
         except Exception as e:
-            self.logger.error(f"Error reading DerivOne data: {str(e)}", exc_info=True)
+            logger.error(f"Error reading DerivOne data: {str(e)}", exc_info=True)
             raise
 
     def validate_data(self, data):
         """
         Validate the read data for basic quality checks.
-        Can be extended based on specific validation requirements.
         """
         if data.empty:
-            self.logger.warning("No data was read from the DerivOne file(s)")
+            logger.warning("No data was read from the DerivOne file(s)")
             return
 
-        # Log basic data statistics
-        self.logger.info(f"Data shape: {data.shape}")
-        self.logger.info(f"Columns: {', '.join(data.columns)}")
+        logger.info(f"Data shape: {data.shape}")
+        logger.info(f"Columns: {', '.join(data.columns)}")
 
-        # Check for missing values
-        missing_counts = data.isnull().sum()
-        if missing_counts.any():
-            self.logger.warning("Missing values found in the following columns:")
-            for col, count in missing_counts[missing_counts > 0].items():
-                self.logger.warning(f"{col}: {count} missing values")
-
-    def generate_intermediate_data(self, file_paths, usecols=None, nrows=None, deduplicate=True):
+    def generate_intermediate_data(self):
         """
         Main method to generate intermediate DerivOne data.
-        Combines reading and validation steps.
         """
         try:
-            # Read the data
-            data = self.read_derivone_data(
-                file_paths=file_paths,
-                usecols=usecols,
-                nrows=nrows,
-                deduplicate=deduplicate
-            )
-
-            # Validate the data
+            file_paths = self.derivone_filepaths.get(self.asset_class)
+            data = self.read_derivone_data(file_paths=file_paths)
             self.validate_data(data)
-
             return data
 
         except Exception as e:
-            self.logger.error(f"Error generating intermediate data: {str(e)}", exc_info=True)
+            logger.error(f"Error generating intermediate data: {str(e)}", exc_info=True)
             raise
 
-    def save_data(self, data, output_path):
+    @staticmethod
+    def save_data(data, output_path):
         """
         Save the processed data to a CSV file.
         """
         try:
-            # Create output directory if it doesn't exist
             output_dir = os.path.dirname(output_path)
             if output_dir and not os.path.exists(output_dir):
                 os.makedirs(output_dir)
 
-            # Save the data
             data.to_csv(output_path, index=False)
-            self.logger.info(f"Data successfully saved to {output_path}")
+            logger.info(f"Data successfully saved to {output_path}")
 
         except Exception as e:
-            self.logger.error(f"Error saving data to {output_path}: {str(e)}", exc_info=True)
+            logger.error(f"Error saving data to {output_path}: {str(e)}", exc_info=True)
             raise
 
 
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Process DerivOne data files.')
-    parser.add_argument('--input-file', required=True, help='Path to the input DerivOne file')
-    parser.add_argument('--output-file', required=True, help='Path to save the processed data')
-    parser.add_argument('--asset-class', required=True, help='Asset class (e.g., EQ, FX, CR)')
-    parser.add_argument('--environment', default='dev', help='Environment (dev/prod)')
-    parser.add_argument('--report-date', required=True, help='Report date (YYYY-MM-DD)')
-    parser.add_argument('--no-dedup', action='store_true', help='Skip deduplication')
+    parser.add_argument('-e', '--env', required=True, type=str, help='Environment parameter', choices=['qa', 'prod'])
+    parser.add_argument('-d', '--run_date', required=True, help='Run Date or date of execution')
+    parser.add_argument('-a', '--asset_classes', nargs='+', help='List of asset classes to process')
     return parser.parse_args()
+
+
+def process_asset_class(asset_class, env, run_date):
+    """
+    Process a single asset class and clean up resources afterwards.
+    """
+    try:
+        # Use context manager to ensure cleanup
+        with IntermediateDerivOneGenerator(
+                asset_class=asset_class,
+                env=env,
+                report_date=run_date
+        ) as generator:
+            # Process the data
+            processed_data = generator.generate_intermediate_data()
+
+            # Save the processed data
+            output_file = rf'C:\Users\{os.getlogin()}\Morgan Stanley\TTRO Independent Testing - APAC New Build\ASIC + MAS + JFSA\Diagnostic Output\intermediate_derivone\{asset_class}_intermediate_derivone_{run_date}.csv'
+            generator.save_data(processed_data, output_file)
+
+            # Explicitly clean up processed data
+            del processed_data
+            gc.collect()
+
+    except Exception as e:
+        logger.error(f"Error processing asset class {asset_class}: {str(e)}", exc_info=True)
+        raise
 
 
 def main():
     """Main function to run the DerivOne data processing."""
-    # Parse command line arguments
-    args = parse_arguments()
+    logger.info('*********************Execution Started*********************')
+    logger.info(f'RUN_DATE = {args.run_date}')
+    logger.info(f'ENVIRONMENT = {args.env.upper()}')
+    logger.info(f'ASSET_CLASSES = {args.asset_classes}')
 
     try:
-        # Initialize the generator
-        generator = IntermediateDerivOneGenerator(asset_class=args.asset_class, environment=args.environment,
-                                                  report_date=args.report_date)
+        for asset_class in args.asset_classes:
+            process_asset_class(asset_class, args.env, args.run_date)
+            # Force garbage collection after each asset class
+            gc.collect()
 
-        # Process the data
-        processed_data = generator.generate_intermediate_data(file_paths=args.input_file, deduplicate=not args.no_dedup)
-
-        # Save the processed data
-        generator.save_data(processed_data, args.output_file)
-
+        logger.info('*********************Execution Finished*********************')
+        logger.info(f'Total time required = {round((time.time() - start_time) / 60, 2)} minutes')
         return 0
 
     except Exception as e:
@@ -164,4 +201,12 @@ def main():
 
 
 if __name__ == '__main__':
+    # Parse command line arguments
+    args = parse_arguments()
+    start_time = time.time()
+    use_case_name = 'intermediate_derivone_generator'
+
+    # Initialize the logger instance
+    logger = get_logger(__name__, args.env, args.run_date, use_case_name=use_case_name, log_to_file=False)
+
     sys.exit(main())

@@ -8,6 +8,7 @@ from common.data_ingestion.data_processor import DataProcessor
 from common.config.logger_config import get_logger
 from common.scripts.derivone_deduplicator import DerivOneDeduplicator
 from common.config.filepath_config import FilePathConfig
+from common.scripts.derivone_key_generator import DerivOneKeyGenerator
 
 
 class IntermediateDerivOneGenerator:
@@ -71,7 +72,7 @@ class IntermediateDerivOneGenerator:
 
     def read_derivone_data(self, file_paths):
         """
-        Read DerivOne data from the specified file paths and deduplicate records.
+        Read DerivOne data from the specified file paths, generate keys, and deduplicate records.
         """
         try:
             logger.info(f"Reading DerivOne data from {file_paths}")
@@ -79,6 +80,19 @@ class IntermediateDerivOneGenerator:
             # Process the data using DataProcessor
             data = self.data_processor.process_data(file_paths=file_paths)
             logger.info(f"Successfully read {len(data)} rows from DerivOne file(s)")
+
+            # Generate matching keys
+            logger.info("Starting key generation process")
+            key_generator = DerivOneKeyGenerator(
+                data=data,
+                asset_class=self.asset_class,
+                environment=self.env,
+                report_date=self.report_date,
+                use_case=use_case_name
+            )
+            data = key_generator.generate_keys()
+            del key_generator
+            logger.info("Key generation completed")
 
             # Deduplicate the data
             logger.info("Starting deduplication process")
@@ -91,6 +105,7 @@ class IntermediateDerivOneGenerator:
                 log_to_file=False
             )
             data = deduplicator.run()
+            del deduplicator
             logger.info(f"After deduplication: {len(data)} rows remaining")
 
             return data
@@ -99,7 +114,8 @@ class IntermediateDerivOneGenerator:
             logger.error(f"Error reading DerivOne data: {str(e)}", exc_info=True)
             raise
 
-    def validate_data(self, data):
+    @staticmethod
+    def validate_data(data):
         """
         Validate the read data for basic quality checks.
         """
@@ -153,7 +169,7 @@ def parse_arguments():
 
 def process_asset_class(asset_class, env, run_date):
     """
-    Process a single asset class and clean up resources afterwards.
+    Process a single asset class and clean up resources afterward.
     """
     try:
         # Use context manager to ensure cleanup
@@ -201,12 +217,17 @@ def main():
 
 
 if __name__ == '__main__':
-    # Parse command line arguments
-    args = parse_arguments()
-    start_time = time.time()
-    use_case_name = 'intermediate_derivone_generator'
+    try:
+        # Parse command line arguments
+        args = parse_arguments()
+        start_time = time.time()
+        use_case_name = 'intermediate_derivone_generator'
 
-    # Initialize the logger instance
-    logger = get_logger(__name__, args.env, args.run_date, use_case_name=use_case_name, log_to_file=False)
+        # Initialize the logger instance
+        logger = get_logger(__name__, args.env, args.run_date, use_case_name=use_case_name, log_to_file=False)
 
-    sys.exit(main())
+        exit_code = main()
+    finally:
+        # Final cleanup
+        gc.collect()
+        sys.exit(exit_code)

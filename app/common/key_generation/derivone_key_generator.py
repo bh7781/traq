@@ -46,6 +46,7 @@ class DerivOneKeyGenerator:
         # Select only the required columns to reduce memory usage
         # self.data = data[self.required_columns].copy()
 
+        # Keep all columns as we need the full data after processing
         self.data = data
 
         self.validate_columns()
@@ -66,16 +67,12 @@ class DerivOneKeyGenerator:
         and converting everything to uppercase.
         """
         try:
-            # cleaning columns
+            # Cleaning columns
             self.logger.debug('Cleaning the values in the required columns.')
-            self.data[self.required_columns] = (
-                self.data[self.required_columns]
-                .fillna('')
-                .astype(str)
-                .apply(lambda x: x.str.strip().str.upper())
-            )
+            for col in self.required_columns:
+                self.data[col] = self.data[col].fillna('').astype(str).str.strip().str.upper()
         except Exception as e:
-            print(f"Error cleaning columns: {e}")
+            self.logger.error(f"Error cleaning columns: {e}")
             raise
 
     def generate_keys(self):
@@ -86,59 +83,41 @@ class DerivOneKeyGenerator:
             # Define the regex pattern to remove non-alphanumeric characters
             pattern = r'[^A-Z0-9]'
 
+            # Dictionary to store new columns
+            new_columns = {}
+
             if self.asset_class in [constants.EQUITY_DERIVATIVES, constants.EQUITY_SWAPS]:
                 # For Equity Derivatives and Swaps
+                self.logger.debug(f'Creating matching keys for {self.asset_class}')
 
                 # Generate matching keys by concatenating relevant columns
-                self.logger.debug(f'Creating matching_key_usi for {self.asset_class}')
-                self.data['matching_key_usi'] = self.data['USI Prefix'].str.cat(self.data['USI Value'], na_rep='')
-
-                self.logger.debug(f'Creating matching_key_uti for {self.asset_class}')
-                self.data['matching_key_uti'] = self.data['UTI Prefix'].str.cat(self.data['UTI Value'], na_rep='')
-
-                self.logger.debug(f'Creating matching_key_huti for {self.asset_class}')
-                self.data['matching_key_huti'] = self.data[self.huti_prefix_col].str.cat(self.data[self.huti_value_col], na_rep='')
-
-                self.logger.debug(f'Creating matching_key_usi_value for {self.asset_class}')
-                self.data['matching_key_usi_value'] = self.data['USI Value']
-
-                self.logger.debug(f'Creating matching_key_uti_value for {self.asset_class}')
-                self.data['matching_key_uti_value'] = self.data['UTI Value']
-
+                new_columns['matching_key_usi'] = self.data['USI Prefix'].str.cat(self.data['USI Value'], na_rep='')
+                new_columns['matching_key_uti'] = self.data['UTI Prefix'].str.cat(self.data['UTI Value'], na_rep='')
+                new_columns['matching_key_huti'] = self.data[self.huti_prefix_col].str.cat(self.data[self.huti_value_col], na_rep='')
+                new_columns['matching_key_usi_value'] = self.data['USI Value']
+                new_columns['matching_key_uti_value'] = self.data['UTI Value']
             else:
                 # For other asset classes, include Party1 LEI in the keys
-
-                # Concatenate Party1 LEI with prefixes and values
+                self.logger.debug(f'Creating matching keys for {self.asset_class}')
                 party1_lei = self.data[self.party1_lei_col]
 
-                self.logger.debug(f'Creating matching_key_usi for {self.asset_class}')
-                self.data['matching_key_usi'] = party1_lei.str.cat(self.data['USI Prefix'], na_rep='').str.cat(self.data['USI Value'], na_rep='')
+                # Generate matching keys by concatenating relevant columns
+                new_columns['matching_key_usi'] = party1_lei.str.cat(self.data['USI Prefix'], na_rep='').str.cat(self.data['USI Value'], na_rep='')
+                new_columns['matching_key_uti'] = party1_lei.str.cat(self.data['UTI Prefix'], na_rep='').str.cat(self.data['UTI Value'], na_rep='')
+                new_columns['matching_key_huti'] = party1_lei.str.cat(self.data[self.huti_prefix_col], na_rep='').str.cat(self.data[self.huti_value_col], na_rep='')
+                new_columns['matching_key_usi_value'] = party1_lei.str.cat(self.data['USI Value'], na_rep='')
+                new_columns['matching_key_uti_value'] = party1_lei.str.cat(self.data['UTI Value'], na_rep='')
 
-                self.logger.debug(f'Creating matching_key_uti for {self.asset_class}')
-                self.data['matching_key_uti'] = party1_lei.str.cat(self.data['UTI Prefix'], na_rep='').str.cat(self.data['UTI Value'], na_rep='')
-
-                self.logger.debug(f'Creating matching_key_huti for {self.asset_class}')
-                self.data['matching_key_huti'] = party1_lei.str.cat(self.data[self.huti_prefix_col], na_rep='').str.cat(self.data[self.huti_value_col], na_rep='')
-
-                self.logger.debug(f'Creating matching_key_usi_value for {self.asset_class}')
-                self.data['matching_key_usi_value'] = party1_lei.str.cat(self.data['USI Value'], na_rep='')
-
-                self.logger.debug(f'Creating matching_key_uti_value for {self.asset_class}')
-                self.data['matching_key_uti_value'] = party1_lei.str.cat(self.data['UTI Value'], na_rep='')
-
-            # List of columns to clean
-            columns_to_clean = ['matching_key_usi', 'matching_key_uti', 'matching_key_huti',
-                                'matching_key_usi_value', 'matching_key_uti_value']
-
-            # Remove non-alphanumeric characters and convert to uppercase
+            # Remove non-alphanumeric characters and convert to uppercase for all new columns
             self.logger.debug('Removing non-alphanumeric characters and converting to uppercase')
-            self.data[columns_to_clean] = (
-                self.data[columns_to_clean]
-                .apply(lambda x: x.str.replace(pattern, '', regex=True).str.upper())
-            )
+            for key in new_columns:
+                new_columns[key] = new_columns[key].str.replace(pattern, '', regex=True).str.upper()
+
+            # Concatenate all new columns to the DataFrame at once
+            self.data = pd.concat([self.data, pd.DataFrame(new_columns)], axis=1)
 
         except Exception as e:
-            print(f"Error generating keys: {e}")
+            self.logger.error(f"Error generating keys: {e}")
             raise
 
         self.logger.debug('Key creation is complete.')
